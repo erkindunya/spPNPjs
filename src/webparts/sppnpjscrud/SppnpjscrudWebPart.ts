@@ -12,7 +12,8 @@ import {
 
 import styles from './SppnpjscrudWebPart.module.scss';
 import * as strings from 'SppnpjscrudWebPartStrings';
-
+import { IListItem } from './loc/IListItem';
+import pnp, { sp, Item, ItemAddResult, ItemUpdateResult } from "sp-pnp-js";
 export interface ISppnpjscrudWebPartProps {
   listName: string;
 }
@@ -64,11 +65,28 @@ export default class SppnpjscrudWebPart extends BaseClientSideWebPart < ISppnpjs
             <ul class="items"><ul>
           </div>
         </div>
+        </div>
+        </div>
       </div>
     </div>`;
-              this.setButtonsEventHandlers();
+    this.updateStatus(this.listNotConfigured() ? 'Please configure list in Web Part properties' : 'Ready');
+    this.setButtonsState();
+    this.setButtonsEventHandlers();
               }
+              private setButtonsState(): void {
+                const buttons: NodeListOf<Element> = this.domElement.querySelectorAll(`button.${styles.button}`);
+                const listNotConfigured: boolean = this.listNotConfigured();
 
+                for (let i: number = 0; i < buttons.length; i++) {
+                  const button: Element = buttons.item(i);
+                  if (listNotConfigured) {
+                    button.setAttribute('disabled', 'disabled');
+                  }
+                  else {
+                    button.removeAttribute('disabled');
+                  }
+                }
+              }
   //Button Event Handlers
   private setButtonsEventHandlers(): void {
     const webPart: SppnpjscrudWebPart = this;
@@ -78,16 +96,153 @@ export default class SppnpjscrudWebPart extends BaseClientSideWebPart < ISppnpjs
     this.domElement.querySelector('button.update-Button').addEventListener('click', () => { webPart.updateItem(); });
     this.domElement.querySelector('button.delete-Button').addEventListener('click', () => { webPart.deleteItem(); });
   }
+  private listNotConfigured(): boolean {
+    return this.properties.listName === undefined ||
+      this.properties.listName === null ||
+      this.properties.listName.length === 0;
+  }
+  private createItem(): void {
+    this.updateStatus('Creating item...');
 
-  private createItem(): void {}
-  private readItem(): void {}
-  private updateItem(): void {}
-  private deleteItem(): void {}
+    sp.web.lists.getByTitle(this.properties.listName).items.add({
+      'Title': `Item ${new Date()}`
+    }).then((result: ItemAddResult): void => {
+      const item: IListItem = result.data as IListItem;
+      this.updateStatus(`Item '${item.Title}' (ID: ${item.Id}) successfully created`);
+    }, (error: any): void => {
+      this.updateStatus('Error while creating the item: ' + error);
+    });
+  }
+  private readItem(): void {
+    this.updateStatus('Reading latest items...');
 
+    this.getLatestItemId()
+      .then((itemId: number): Promise<IListItem> => {
+        if (itemId === -1) {
+          throw new Error('No items found in the list');
+        }
+
+        this.updateStatus(`Loading information about item ID: ${itemId}...`);
+        return sp.web.lists.getByTitle(this.properties.listName)
+          .items.getById(itemId).select('Title', 'Id').get();
+      })
+      .then((item: IListItem): void => {
+        this.updateStatus(`Item ID: ${item.Id}, Title: ${item.Title}`);
+      }, (error: any): void => {
+        this.updateStatus('Loading latest item failed with error: ' + error);
+      });
+  }
+  private updateItem(): void {
+    this.updateStatus('Loading latest items...');
+    let latestItemId: number = undefined;
+    let etag: string = undefined;
+
+    this.getLatestItemId()
+      .then((itemId: number): Promise<Item> => {
+        if (itemId === -1) {
+          throw new Error('No items found in the list');
+        }
+
+        latestItemId = itemId;
+        this.updateStatus(`Loading information about item ID: ${itemId}...`);
+        return sp.web.lists.getByTitle(this.properties.listName)
+          .items.getById(itemId).get(undefined, {
+            headers: {
+              'Accept': 'application/json;odata=minimalmetadata'
+            }
+          });
+      })
+      .then((item: Item): Promise<IListItem> => {
+        etag = item["odata.etag"];
+        return Promise.resolve((item as any) as IListItem);
+      })
+      .then((item: IListItem): Promise<ItemUpdateResult> => {
+        return sp.web.lists.getByTitle(this.properties.listName)
+          .items.getById(item.Id).update({
+            'Title': `Updated Item ${new Date()}`
+          }, etag);
+      })
+      .then((result: ItemUpdateResult): void => {
+        this.updateStatus(`Item with ID: ${latestItemId} successfully updated`);
+      }, (error: any): void => {
+        this.updateStatus('Loading latest item failed with error: ' + error);
+      });
+  }
+  private deleteItem(): void {
+    if (!window.confirm('Are you sure you want to delete the latest item?')) {
+      return;
+    }
+
+    this.updateStatus('Loading latest items...');
+    let latestItemId: number = undefined;
+    let etag: string = undefined;
+    this.getLatestItemId()
+      .then((itemId: number): Promise<Item> => {
+        if (itemId === -1) {
+          throw new Error('No items found in the list');
+        }
+
+        latestItemId = itemId;
+        this.updateStatus(`Loading information about item ID: ${latestItemId}...`);
+        return sp.web.lists.getByTitle(this.properties.listName)
+          .items.getById(latestItemId).select('Id').get(undefined, {
+            headers: {
+              'Accept': 'application/json;odata=minimalmetadata'
+            }
+          });
+      })
+      .then((item: Item): Promise<IListItem> => {
+        etag = item["odata.etag"];
+        return Promise.resolve((item as any) as IListItem);
+      })
+      .then((item: IListItem): Promise<void> => {
+        this.updateStatus(`Deleting item with ID: ${latestItemId}...`);
+        return sp.web.lists.getByTitle(this.properties.listName)
+          .items.getById(item.Id).delete(etag);
+      })
+      .then((): void => {
+        this.updateStatus(`Item with ID: ${latestItemId} successfully deleted`);
+      }, (error: any): void => {
+        this.updateStatus(`Error deleting item: ${error}`);
+      });
+  }
+
+  private updateStatus(status: string, items: IListItem[] = []): void {
+    this.domElement.querySelector('.status').innerHTML = status;
+    this.updateItemsHtml(items);
+  }
+  private updateItemsHtml(items: IListItem[]): void {
+    this.domElement.querySelector('.items').innerHTML = items.map(item => `<li>${item.Title} (${item.Id})</li>`).join("");
+  }
 
 //   <a href="https://aka.ms/spfx" class="${ styles.button }">
 //   <span class="${ styles.label }">Learn more</span>
 // </a>
+
+
+/* We will use the sp-pnp-js APIs to perform CRUD operations. Let us implement generic method which will return the id of latest item from given list using sp-pnp-js APIs.  */
+private getLatestItemId(): Promise<number> {
+  return new Promise<number>((resolve: (itemId: number) => void, reject: (error: any) => void): void => {
+    sp.web.lists.getByTitle(this.properties.listName)
+      .items.orderBy('Id', false).top(1).select('Id').get()
+      .then((items: { Id: number }[]): void => {
+        if (items.length === 0) {
+          resolve(-1);
+        }
+        else {
+          resolve(items[0].Id);
+        }
+      }, (error: any): void => {
+        reject(error);
+      });
+  });
+}
+
+/* Implement Create Operation
+
+We will use the sp-pnp-js API of items.add to add the item to list */
+
+
 protected get dataVersion(): Version {
   return Version.parse('1.0');
 }
